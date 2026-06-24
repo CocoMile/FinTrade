@@ -1,0 +1,38 @@
+{
+  "stocks": {
+    "NVDA": {
+      "data": {
+        "start_date": "2007-01-01",
+        "end_date": "2026-12-31",
+        "output_dir": "outputs/figures/NVDA"
+      },
+      "scenario1": {
+        "m20_slope_min": 0,
+        "m350_slope_min": -0.5,
+        "gap_20_350_max": 10,
+        "m50_slope_min": -1,
+        "m70_slope_min": -1,
+        "entanglement_max": 5
+      },
+      "scenario2": {
+        "m20_slope_max": 0,
+        "m50_slope_min": 0,
+        "m70_slope_min": 0,
+        "near_m20_threshold": 0.01,
+        "near_m50_threshold": 0.01,
+        "near_m70_threshold": 0.01
+      },
+      "scenario3": {
+        "slope_min": 0,
+        "obvious_gap": 0.5,
+        "volume_ratio": 1.2,
+        "high_20d_lookback": 20,
+        "near_m10_threshold": 0.02,
+        "near_m20_threshold": 0.02
+      }
+    }
+  },
+  "global": {
+
+  }
+}
