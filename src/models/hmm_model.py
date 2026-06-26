@@ -53,6 +53,7 @@ class HMModel:
             tol=1e-4
         )
         self.fitted = False
+        self.state_mapping = None # 修复：用于存储无监督状态到有序波动率状态的映射
 
     def fit(self, X):
         """
@@ -61,17 +62,32 @@ class HMModel:
         """
         self.model.fit(X)
         self.fitted = True
+        
+        # 修复逻辑：通过计算每个隐状态在【振幅】特征上的均值，对状态进行升序重新排序
+        # 假设我们特征矩阵的最后一列是 amplitude (根据 prepare_features 对应)
+        amplitude_col_idx = X.shape[1] - 1 
+        raw_means = self.model.means_[:, amplitude_col_idx]
+        
+        # 获取升序排列的原始状态索引（振幅均值最小的排第一）
+        sorted_indices = np.argsort(raw_means)
+        
+        # 建立 原始随机状态 -> 有序波动率状态[0, 1, 2] 的映射
+        self.state_mapping = {raw_idx: ordered_idx for ordered_idx, raw_idx in enumerate(sorted_indices)}
         return self
 
     def predict(self, X):
         """
-        预测隐状态序列
+        预测隐状态序列（已修复：输出统一按波动率从小到大映射为 0, 1, 2）
         :param X: 特征矩阵
         :return: 状态数组 (n_samples,)
         """
         if not self.fitted:
             raise ValueError("模型尚未训练，请先调用 fit()")
-        return self.model.predict(X)
+        raw_states = self.model.predict(X)
+        
+        # 将原始状态转换为标准化后的波动率状态
+        ordered_states = np.array([self.state_mapping[s] for s in raw_states])
+        return ordered_states
 
     def predict_proba(self, X):
         """
@@ -81,33 +97,50 @@ class HMModel:
         """
         if not self.fitted:
             raise ValueError("模型尚未训练，请先调用 fit()")
-        return self.model.predict_proba(X)
+        raw_proba = self.model.predict_proba(X)
+        
+        # 修复逻辑：概率矩阵的列顺序也必须根据映射重新调整
+        ordered_proba = np.zeros_like(raw_proba)
+        for raw_idx, ordered_idx in self.state_mapping.items():
+            ordered_proba[:, ordered_idx] = raw_proba[:, raw_idx]
+        return ordered_proba
 
 
 def prepare_features(df, lookback=20):
     """
-    从原始数据中提取 HMM 所需的特征
+    从原始数据中提取 HMM 所需的特征（已修复维度污染与方向性特征）
     :param df: 包含 'close', 'volume', 'high', 'low' 的 DataFrame（升序）
     :param lookback: 用于计算波动率的窗口
-    :return: 特征 DataFrame（去除缺失值）
+    :return: 特征 DataFrame（去除缺失值，并完成 Z-Score 标准化）
     """
     data = df.copy()
-    # 对数收益率
+    
+    # 1. 提取纯粹反映波动与剧烈程度的非方向性特征
     data['log_ret'] = np.log(data['close'] / data['close'].shift(1))
-    # 波动率（滚动标准差）
     data['volatility'] = data['log_ret'].rolling(lookback).std()
-    # 成交量变化率
-    data['volume_change'] = data['volume'].pct_change()
-    # 价格振幅 (high-low)/close
+    
+    # 帕金森波动率（基于高低价，比收盘价标准差对盘中剧烈程度更敏感）
+    data['pk_vol'] = np.sqrt((1 / (4 * np.log(2))) * (np.log(data['high'] / data['low'])) ** 2).rolling(lookback).mean()
+    
+    # 价格振幅
     data['amplitude'] = (data['high'] - data['low']) / data['close']
-    # 相对强弱（短期涨跌幅）
-    data['ret_5'] = data['close'].pct_change(5)
-    data['ret_10'] = data['close'].pct_change(10)
 
+<<<<<<< HEAD
     # 选择特征列
     feature_cols = ['log_ret', 'volatility', 'volume_change', 'amplitude', 'ret_5', 'ret_10']
     features = data[feature_cols].replace([np.inf, -np.inf], np.nan).dropna()
     return features
+=======
+    # 确定最终参与 HMM 的特征列 (严格剥离带牛熊方向的 ret_5, ret_10 动量特征)
+    # 特征最后一列必须为 amplitude，供 HMModel.fit 内部排序绑定
+    feature_cols = ['volatility', 'pk_vol', 'amplitude']
+    features_raw = data[feature_cols].dropna()
+    
+    # 2. 修复逻辑：必须进行 Z-Score 标准化，抹平不同指标的量纲差距
+    features_scaled = (features_raw - features_raw.mean()) / features_raw.std()
+    
+    return features_scaled
+>>>>>>> 71fc246 (增加MA20,MA50和MA70缠绕产生的卖出头寸信号)
 
 
 def plot_states(df, states, title="HMM 市场状态识别"):
@@ -152,7 +185,7 @@ def plot_states(df, states, title="HMM 市场状态识别"):
         line=dict(color='black', width=1.5)
     ), row=1, col=1)
 
-    # ----- 第二行：状态热力图（使用单行 y=[0]，并压缩 y 轴范围）-----
+    # ----- 第二行：状态热力图 -----
     state_values = df_aligned['state'].values.reshape(1, -1)
     colorscale = [
         [0.0, state_colors[0]],
@@ -172,7 +205,7 @@ def plot_states(df, states, title="HMM 市场状态识别"):
         hovertemplate='日期: %{x}<br>状态: %{text}<extra></extra>'
     ), row=2, col=1)
 
-    # 手动添加图例（用散点图伪造）
+    # 手动添加图例
     for state, color in state_colors.items():
         fig.add_trace(go.Scatter(
             x=[None], y=[None],
@@ -181,7 +214,7 @@ def plot_states(df, states, title="HMM 市场状态识别"):
             name=state_names[state]
         ), row=2, col=1)
 
-    # 更新布局：压缩第二行 y 轴范围，使色带变细
+    # 更新布局
     fig.update_yaxes(title_text="价格", row=1, col=1)
     fig.update_yaxes(
         title_text="",
@@ -232,12 +265,12 @@ if __name__ == "__main__":
     df = df.sort_values("date", ascending=True).reset_index(drop=True)
 
     # 准备特征
-    print("🧮 提取特征...")
+    print("🧮 提取并标准化特征...")
     features = prepare_features(df)
     print(f"特征矩阵形状：{features.shape}")
 
     # 训练 HMM
-    print("🔄 训练 HMM 模型...")
+    print("🔄 训练 HMM 模型并执行状态自动对齐...")
     hmm_model = HMModel(n_states=N_STATES)
     hmm_model.fit(features.values)
 
@@ -246,10 +279,11 @@ if __name__ == "__main__":
     state_series = pd.Series(states, index=features.index, name='state')
 
     # 统计状态分布
-    print("\n📊 HMM 状态分布：")
+    print("\n📊 HMM 严格映射后的状态分布：")
     state_counts = state_series.value_counts().sort_index()
+    state_labels = {0: "低波动 (蓄势期)", 1: "中波动 (趋势期)", 2: "高波动 (风险期)"}
     for s, count in state_counts.items():
-        print(f"  State {s}: {count} 天 ({count/len(state_series)*100:.1f}%)")
+        print(f"  State {s} [{state_labels[s]}]: {count} 天 ({count/len(state_series)*100:.1f}%)")
 
     # 绘制状态图
     print(f"\n📈 生成状态可视化图表...")
@@ -258,10 +292,9 @@ if __name__ == "__main__":
     fig.write_html(os.path.join(OUTPUT_DIR, "hmm_states.html"))
     print(f"✅ 图表已保存至 {OUTPUT_DIR}/hmm_states.html")
 
-    # 展示近期的状态转移（可选）
-    print("\n🔍 最近 30 天的状态：")
+    # 展示近期的状态转移
+    print("\n🔍 最近 30 天的状态序列：")
     recent = state_series.tail(30)
     print(recent.tolist())
 
     print("\n🎯 HMM 测试完成！")
-    print("👉 请用浏览器打开 outputs/figures/hmm_states.html 查看状态划分。")

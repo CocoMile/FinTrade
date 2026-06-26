@@ -305,6 +305,47 @@ class TurtleStrategy:
 
         return signals if signals else None
 
+    # ---------- 新增：卖出信号（规则三） ，更名为 _stop_setup_1 ----------
+    def _stop_setup_1(self):
+        """
+        根据规则三生成卖出信号点：
+        - M20、M50、M70 缠绕（entanglement < 阈值）
+        - 三条均线斜率均为负
+        - 股价贴近 M20（偏离度 < 阈值）
+        满足以上条件时，标记该 K 线为卖出信号点。
+        """
+        df = self.df
+        # 从配置中读取退出参数（若无则使用默认值）
+        exit_cfg = self.config.get('exit', {})
+        confluence_threshold = exit_cfg.get('confluence_threshold', 2.0)   # 缠绕阈值（%）
+        near_ma20_threshold = exit_cfg.get('near_ma20_threshold', 1.5)    # 贴近M20阈值（%）
+
+        # 初始化列
+        df['exit_signal'] = False
+        df['exit_reason'] = ''
+
+        # 从足够长的位置开始遍历（确保所有均线有效）
+        for i in range(350, len(df)):
+            row = df.iloc[i]
+            # 跳过任何指标计算不完整的行
+            if pd.isna(row['entanglement']) or pd.isna(row['M20_slope']) or pd.isna(row['M50_slope']) or pd.isna(row['M70_slope']):
+                continue
+            # 条件1：缠绕
+            if row['entanglement'] >= confluence_threshold:
+                continue
+            # 条件2：三条均线斜率均为负
+            if row['M20_slope'] >= 0 or row['M50_slope'] >= 0 or row['M70_slope'] >= 0:
+                continue
+            # 条件3：股价贴近 M20（偏离度小于阈值）
+            if abs(row['close'] - row['M20']) / row['M20'] * 100 >= near_ma20_threshold:
+                continue
+
+            # 所有条件满足 → 标记卖出信号
+            df.at[df.index[i], 'exit_signal'] = True
+            df.at[df.index[i], 'exit_reason'] = '均线缠绕向下_反抽MA20'
+
+        return df
+
 
 # ========================== 独立测试入口 ==========================
 if __name__ == "__main__":
@@ -313,7 +354,7 @@ if __name__ == "__main__":
     可自定义股票代码和日期范围。
     """
     # ---------- 配置 ----------
-    TICKER = "NVDA"  # 可以从 settings.json 读取或硬编码
+    TICKER = "MSFT"  # 可以从 settings.json 读取或硬编码
     # 加载策略配置
     try:
         stock_config = load_strategy_config(TICKER)   # 返回股票配置字典
@@ -377,6 +418,13 @@ if __name__ == "__main__":
     print("🔍 扫描买入信号...")
     signals_df = strategy.scan(earnings_soon=False, stop_method='atr')
 
+    # ---------- 新增：生成卖出信号（规则三），调用 _stop_setup_1 ----------
+    print("🔻 生成卖出信号（规则三：均线缠绕向下，反抽MA20）...")
+    strategy._stop_setup_1()          # 更新 strategy.df
+    df = strategy.df                  # 获取更新后的数据（包含 exit_signal 列）
+    exit_signals = df[df['exit_signal'] == True]
+    print(f"✅ 共发现 {len(exit_signals)} 个卖出信号点。")
+
     # ---------- 控制台输出 ----------
     setup_names = {
         '1_Consolidation': '场景1：下跌后或横盘中',
@@ -405,6 +453,8 @@ if __name__ == "__main__":
 
     # ---------- 新增：组合图（价格+信号 + MA100斜率柱状图） ----------
     print(f"\n📈 生成组合图（价格+信号 + MA100斜率柱状图）...")
+    # 注意：df 已经包含 exit_signal 列（从 strategy.df 复制而来）
+    # 但为保险，我们重新从 strategy.df 复制一份，以确保包含最新列
     df = strategy.df.copy()
     
     # 计算 MA100 和斜率
@@ -469,6 +519,23 @@ if __name__ == "__main__":
                 text=group['note'],
                 hovertemplate='<b>%{text}</b><br>日期: %{x}<br>价格: %{y:.2f}<extra></extra>'
             ), row=1, col=1)
+
+    # ---------- 新增：卖出信号（规则三） ----------
+    if not exit_signals.empty:
+        fig_combined.add_trace(go.Scatter(
+            x=exit_signals['date'],
+            y=exit_signals['close'],
+            mode='markers',
+            name='卖出信号 (均线缠绕向下)',
+            marker=dict(
+                symbol='triangle-down',
+                size=14,
+                color='red',
+                line=dict(width=1, color='darkred')
+            ),
+            text=exit_signals['exit_reason'],
+            hovertemplate='<b>%{text}</b><br>日期: %{x}<br>价格: %{y:.2f}<extra></extra>'
+        ), row=1, col=1)
 
     # 下子图：MA100 斜率柱状图
     fig_combined.add_trace(go.Bar(
