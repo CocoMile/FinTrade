@@ -325,7 +325,7 @@ if __name__ == "__main__":
     data_cfg = stock_config.get('data', {})
     START_DATE = data_cfg.get('start_date', "2007-01-01")
     END_DATE = data_cfg.get('end_date', "2026-12-31")
-    OUTPUT_DIR = data_cfg.get('output_dir', "outputs/figures")
+    OUTPUT_DIR = data_cfg.get('output_dir', f"outputs/figures/{TICKER}")
     ATR_PERIOD = 14
 
     print(f"📊 正在加载 {TICKER} 数据（{START_DATE} ~ {END_DATE}）...")

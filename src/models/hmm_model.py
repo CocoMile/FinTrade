@@ -106,7 +106,7 @@ def prepare_features(df, lookback=20):
 
     # 选择特征列
     feature_cols = ['log_ret', 'volatility', 'volume_change', 'amplitude', 'ret_5', 'ret_10']
-    features = data[feature_cols].dropna()
+    features = data[feature_cols].replace([np.inf, -np.inf], np.nan).dropna()
     return features
 
 
@@ -208,7 +208,7 @@ if __name__ == "__main__":
     START_DATE = "2007-01-01"
     END_DATE = "2026-12-31"
     N_STATES = 3
-    OUTPUT_DIR = "outputs/figures"
+    OUTPUT_DIR = f"outputs/figures/{TICKER}"
 
     print(f"📊 加载 {TICKER} 数据（{START_DATE} ~ {END_DATE}）...")
     loader = DataLoader(
