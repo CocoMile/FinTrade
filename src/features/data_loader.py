@@ -29,12 +29,15 @@ sys.path.append(project_root)
 
 
 def load_strategy_config(ticker):
-    """加载指定股票的策略配置"""
-    config_path = os.path.join(project_root, "config", f"{ticker}_settings.json")
+    """加载指定股票配置；若不存在则回退到通用配置。"""
+    stock_path = os.path.join(project_root, "config", f"{ticker}_settings.json")
+    general_path = os.path.join(project_root, "config", "general_setting.json")
+    config_path = stock_path if os.path.exists(stock_path) else general_path
+
     with open(config_path, 'r', encoding='utf-8') as f:
-        config = json.load(f)
-    stock_cfg = config['stocks'].get(ticker)
-    return stock_cfg
+        stocks = json.load(f).get('stocks', {})
+
+    return stocks.get(ticker) or stocks.get('DEFAULT', {})
 
 
 # ==================== 数据获取 ====================

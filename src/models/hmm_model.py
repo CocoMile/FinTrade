@@ -125,22 +125,15 @@ def prepare_features(df, lookback=20):
     # 价格振幅
     data['amplitude'] = (data['high'] - data['low']) / data['close']
 
-<<<<<<< HEAD
-    # 选择特征列
-    feature_cols = ['log_ret', 'volatility', 'volume_change', 'amplitude', 'ret_5', 'ret_10']
-    features = data[feature_cols].replace([np.inf, -np.inf], np.nan).dropna()
-    return features
-=======
     # 确定最终参与 HMM 的特征列 (严格剥离带牛熊方向的 ret_5, ret_10 动量特征)
     # 特征最后一列必须为 amplitude，供 HMModel.fit 内部排序绑定
     feature_cols = ['volatility', 'pk_vol', 'amplitude']
-    features_raw = data[feature_cols].dropna()
+    features_raw = data[feature_cols].replace([np.inf, -np.inf], np.nan).dropna()
     
     # 2. 修复逻辑：必须进行 Z-Score 标准化，抹平不同指标的量纲差距
     features_scaled = (features_raw - features_raw.mean()) / features_raw.std()
     
     return features_scaled
->>>>>>> 71fc246 (增加MA20,MA50和MA70缠绕产生的卖出头寸信号)
 
 
 def plot_states(df, states, title="HMM 市场状态识别"):
