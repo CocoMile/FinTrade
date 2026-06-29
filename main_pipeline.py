@@ -10,6 +10,8 @@ main_pipeline.py
 import os
 import sys
 import json
+import re
+from datetime import datetime
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
@@ -196,122 +198,303 @@ def plot_combined(df_price, signals_df, state_series, title="海龟策略信号�
     return fig
 
 
-if __name__ == "__main__":
-    # ---------- 配置 ----------
-    TICKER = "AAPL"  # 可改为 "AAPL", "SH600036" 等
+def normalize_tickers(tickers_input):
+    """标准化 ticker 输入，支持 list/tuple 或逗号分隔字符串。"""
+    if tickers_input is None:
+        return ["AAPL"]
 
-    # 加载策略配置
-    try:
-        stock_config = load_strategy_config(TICKER)   # 返回股票配置字典
-    except Exception as e:
-        print(f"⚠️ 加载配置失败：{e}，使用默认参数")
-        stock_config = {}
+    if isinstance(tickers_input, str):
+        tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
+        return tickers or ["AAPL"]
 
-    # 从配置中读取参数，若不存在则使用默认值
-    data_cfg = stock_config.get('data', {})
-    strategy_cfg = stock_config.get('strategy', {})
-    START_DATE = data_cfg.get('start_date', "2007-01-01")
-    END_DATE = data_cfg.get('end_date', "2026-12-31")
-    OUTPUT_DIR = data_cfg.get('output_dir', f"outputs/figures/{TICKER}")
-    ATR_PERIOD = strategy_cfg.get('atr_period', 14)
-    N_STATES = 3
+    if isinstance(tickers_input, (list, tuple, set)):
+        tickers = [str(t).strip().upper() for t in tickers_input if str(t).strip()]
+        return tickers or ["AAPL"]
 
-    # ---------- 新增：检查 processed 文件是否存在，若不存在则运行数据流水线 ----------
-    processed_file = os.path.join("data", TICKER, f"{TICKER}_processed.xlsx")
+    raise TypeError("tickers_input 必须是 list/tuple/set 或逗号分隔字符串")
+
+
+def should_refresh_processed_data(processed_file, end_date):
+    """
+    判断是否需要更新 processed 数据。
+    规则：若 processed 文件最新日期 < min(end_date, today)，则需要更新。
+    """
+    today = pd.Timestamp.today().normalize()
+    end_dt = pd.to_datetime(end_date, errors='coerce')
+    target_dt = min(end_dt.normalize(), today) if pd.notna(end_dt) else today
+
     if not os.path.exists(processed_file):
-        print(f"⚠️ 未找到 {TICKER} 的 processed 数据，正在运行数据流水线...")
-        try:
-            run_data_pipeline(tickers=[TICKER])   # 仅更新当前 TICKER 的数据
-        except Exception as e:
-            print(f"❌ 数据流水线运行失败：{e}")
-            sys.exit(1)
+        return True, None, target_dt, "未找到 processed 文件"
 
-    print(f"📊 加载 {TICKER} 数据（{START_DATE} ~ {END_DATE}）...")
-    loader = DataLoader(
-        ticker=TICKER,
-        start_date=START_DATE,
-        end_date=END_DATE,
-        data_root="data"
-    )
     try:
+        df_date = pd.read_excel(processed_file, usecols=['date'])
+        if df_date.empty or 'date' not in df_date.columns:
+            return True, None, target_dt, "processed 文件缺少有效 date 列"
+
+        latest_dt = pd.to_datetime(df_date['date'], errors='coerce').dropna().max()
+        if pd.isna(latest_dt):
+            return True, None, target_dt, "processed 文件日期列无法解析"
+
+        latest_dt = latest_dt.normalize()
+        needs_update = latest_dt < target_dt
+        reason = f"最新日期 {latest_dt.date()}，目标日期 {target_dt.date()}"
+        return needs_update, latest_dt, target_dt, reason
+    except Exception as e:
+        return True, None, target_dt, f"读取 processed 文件失败: {e}"
+
+
+def run_one_ticker_pipeline(ticker, n_states=3):
+        """运行单个 ticker 的完整流程，返回图表与摘要信息。"""
+        print("\n" + "=" * 80)
+        print(f"🚀 开始处理 {ticker}")
+        print("=" * 80)
+
+        # 加载策略配置
+        try:
+                stock_config = load_strategy_config(ticker)
+        except Exception as e:
+                print(f"⚠️ 加载 {ticker} 配置失败：{e}，使用默认参数")
+                stock_config = {}
+
+        data_cfg = stock_config.get('data', {})
+        strategy_cfg = stock_config.get('strategy', {})
+        start_date = data_cfg.get('start_date', "2007-01-01")
+        end_date = data_cfg.get('end_date', "2026-12-31")
+        output_dir = data_cfg.get('output_dir', f"outputs/figures/{ticker}")
+        atr_period = strategy_cfg.get('atr_period', 14)
+
+        # 按 end_date、今天日期、processed 最新日期决定是否更新数据
+        processed_file = os.path.join("data", ticker, f"{ticker}_processed.xlsx")
+        need_update, latest_dt, target_dt, update_reason = should_refresh_processed_data(processed_file, end_date)
+        if need_update:
+            print(f"⚠️ {ticker} 需要更新数据（{update_reason}），正在运行数据流水线...")
+            try:
+                run_data_pipeline(tickers=[ticker])
+            except Exception as e:
+                raise RuntimeError(f"数据流水线运行失败：{e}") from e
+        else:
+            print(f"✅ {ticker} 数据为最新（{update_reason}），跳过更新")
+
+        print(f"📊 加载 {ticker} 数据（{start_date} ~ {end_date}）...")
+        loader = DataLoader(
+                ticker=ticker,
+                start_date=start_date,
+                end_date=end_date,
+                data_root="data"
+        )
         df = loader.load_processed_data()
-    except FileNotFoundError as e:
-        print(f"❌ {e}")
-        print("💡 请先运行数据流水线：python src/features/data_loader.py")
+        if df.empty:
+                raise ValueError(f"{ticker} 在所选日期范围内数据为空")
+
+        # 转为升序
+        df = df.sort_values("date", ascending=True).reset_index(drop=True)
+
+        # 提取基础 OHLCV 用于策略
+        base_cols = ['date', 'open', 'high', 'low', 'close', 'volume']
+        if not all(col in df.columns for col in base_cols):
+                raise ValueError(f"{ticker} 缺少必要的 OHLCV 列")
+        df_base = df[base_cols].copy()
+
+        # 1) 运行海龟策略
+        print(f"🐢 初始化海龟策略（ATR周期={atr_period}）...")
+        strategy = TurtleStrategy(df_base, config=stock_config, atr_period=atr_period)
+        print("🔍 扫描买入信号...")
+        signals_df = strategy.scan(earnings_soon=False, stop_method='atr')
+
+        # 生成卖出信号（规则三）
+        print("🔻 生成卖出信号（规则三：均线缠绕向下，反抽MA20）...")
+        strategy._stop_setup_1()
+        df_with_exit = strategy.df
+        exit_signals = df_with_exit[df_with_exit['exit_signal'] == True]
+        print(f"✅ 共发现 {len(exit_signals)} 个卖出信号点。")
+
+        # 2) 运行 HMM
+        print("🧮 准备 HMM 特征...")
+        features = prepare_features(df)
+        print(f"特征矩阵形状：{features.shape}")
+
+        print("🔄 训练 HMM 模型...")
+        hmm_model = HMModel(n_states=n_states)
+        hmm_model.fit(features.values)
+        states = hmm_model.predict(features.values)
+        state_series = pd.Series(states, index=features.index, name='state')
+
+        # 统计状态分布
+        print("📊 HMM 状态分布：")
+        state_counts = state_series.value_counts().sort_index()
+        for s, count in state_counts.items():
+                print(f"  State {s}: {count} 天 ({count / len(state_series) * 100:.1f}%)")
+
+        # 3) 绘图
+        print("📈 生成组合图表（三行，含 MA100 斜率柱状图，并显示卖出信号）...")
+        fig = plot_combined(
+                df_price=strategy.df,
+                signals_df=signals_df,
+                state_series=state_series,
+                title=f"{ticker} 海龟策略信号 + MA100斜率 + HMM 市场状态 (3种状态)",
+                exit_signals=exit_signals
+        )
+
+        return {
+                "ticker": ticker,
+                "figure": fig,
+                "signals_df": signals_df,
+                "output_dir": output_dir
+        }
+
+
+def save_integrated_dashboard(results, output_path):
+        """保存整合模式 HTML，含 ticker 下拉菜单切换。"""
+        tickers = [item["ticker"] for item in results]
+        option_html = "\n".join([
+                f'<option value="{t}">{t}</option>' for t in tickers
+        ])
+
+        plot_blocks = []
+        for idx, item in enumerate(results):
+                ticker = item["ticker"]
+                fig = item["figure"]
+                safe_id = "plot_" + re.sub(r'[^A-Za-z0-9_]', '_', ticker)
+                plot_html = fig.to_html(
+                        full_html=False,
+                        include_plotlyjs=(idx == 0),
+                        div_id=safe_id,
+                        config={"responsive": True}
+                )
+                display = "block" if idx == 0 else "none"
+                wrapped = f'<div class="ticker-panel" data-ticker="{ticker}" style="display:{display};">{plot_html}</div>'
+                plot_blocks.append(wrapped)
+
+        html = f"""<!DOCTYPE html>
+<html lang=\"zh-CN\">
+<head>
+    <meta charset=\"utf-8\" />
+    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+    <title>FinTrade Integrated Dashboard</title>
+    <style>
+        body {{
+            margin: 0;
+            padding: 16px;
+            font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;
+            background: #f6f8fb;
+            color: #222;
+        }}
+        .toolbar {{
+            position: sticky;
+            top: 0;
+            z-index: 10;
+            background: #ffffff;
+            border: 1px solid #e6e9f0;
+            border-radius: 10px;
+            padding: 12px;
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }}
+        .toolbar label {{
+            font-weight: 600;
+        }}
+        .toolbar select {{
+            border: 1px solid #c8d0e0;
+            border-radius: 8px;
+            padding: 6px 10px;
+            font-size: 14px;
+            background: #fff;
+        }}
+    </style>
+</head>
+<body>
+    <div class=\"toolbar\">
+        <label for=\"tickerSelect\">选择Ticker:</label>
+        <select id=\"tickerSelect\">{option_html}</select>
+    </div>
+
+    {''.join(plot_blocks)}
+
+    <script>
+        const selectEl = document.getElementById('tickerSelect');
+        const panels = document.querySelectorAll('.ticker-panel');
+
+        function switchTicker(ticker) {{
+            panels.forEach((panel) => {{
+                panel.style.display = panel.dataset.ticker === ticker ? 'block' : 'none';
+            }});
+            window.dispatchEvent(new Event('resize'));
+        }}
+
+        selectEl.addEventListener('change', (e) => switchTicker(e.target.value));
+        switchTicker(selectEl.value);
+    </script>
+</body>
+</html>
+"""
+
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write(html)
+
+
+def run_multi_ticker_pipeline(tickers_input, mode="standalone", n_states=3):
+    """运行多 ticker 主流程。"""
+    tickers = normalize_tickers(tickers_input)
+    mode = str(mode).strip().lower()
+    if mode not in {"standalone", "integrated"}:
+        raise ValueError("mode 必须是 'standalone' 或 'integrated'")
+
+    print("\n📌 本次运行参数：")
+    print(f"- tickers: {tickers}")
+    print(f"- mode: {mode}")
+    print(f"- n_states: {n_states}")
+
+    results = []
+    failed = []
+
+    for ticker in tickers:
+        try:
+            result = run_one_ticker_pipeline(ticker=ticker, n_states=n_states)
+            results.append(result)
+        except Exception as e:
+            print(f"❌ {ticker} 处理失败：{e}")
+            failed.append(ticker)
+
+    if not results:
+        print("\n❌ 所有 ticker 均处理失败，程序结束。")
         sys.exit(1)
 
-    if df.empty:
-        print("⚠️ 数据为空，请检查日期范围。")
-        sys.exit(1)
+    if mode == "standalone":
+        for item in results:
+            ticker = item["ticker"]
+            fig = item["figure"]
+            output_dir = item["output_dir"]
+            os.makedirs(output_dir, exist_ok=True)
+            output_path = os.path.join(output_dir, f"{ticker}_pipeline.html")
+            fig.write_html(output_path)
+            item["output_path"] = output_path
+            print(f"✅ [{ticker}] 组合图表已保存至 {output_path}")
+    else:
+        integrated_dir = os.path.join("outputs", "figures")
+        os.makedirs(integrated_dir, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d")
+        integrated_name = f"integrated_pipeline_{timestamp}.html"
+        integrated_path = os.path.join(integrated_dir, integrated_name)
+        save_integrated_dashboard(results, integrated_path)
+        print(f"✅ 整合图表已保存至 {integrated_path}")
 
-    # 转为升序
-    df = df.sort_values("date", ascending=True).reset_index(drop=True)
-
-    # 提取基础 OHLCV 用于策略
-    base_cols = ['date', 'open', 'high', 'low', 'close', 'volume']
-    if not all(col in df.columns for col in base_cols):
-        print("❌ 缺少必要的 OHLCV 列，请检查 processed 数据格式。")
-        sys.exit(1)
-    df_base = df[base_cols].copy()
-
-    # ---------- 1. 运行海龟策略（传入配置） ----------
-    print(f"\n🐢 初始化海龟策略（ATR周期={ATR_PERIOD}）...")
-    strategy = TurtleStrategy(df_base, config=stock_config, atr_period=ATR_PERIOD)
-    print("🔍 扫描买入信号...")
-    signals_df = strategy.scan(earnings_soon=False, stop_method='atr')
-
-    # ---------- 新增：生成卖出信号（规则三） ----------
-    print("🔻 生成卖出信号（规则三：均线缠绕向下，反抽MA20）...")
-    strategy._stop_setup_1()          # 更新 strategy.df，增加 exit_signal 和 exit_reason
-    df_with_exit = strategy.df        # 获取包含卖出信号的数据
-    exit_signals = df_with_exit[df_with_exit['exit_signal'] == True]
-    print(f"✅ 共发现 {len(exit_signals)} 个卖出信号点。")
-
-    # ---------- 2. 运行 HMM ----------
-    print("🧮 准备 HMM 特征...")
-    features = prepare_features(df)
-    print(f"特征矩阵形状：{features.shape}")
-
-    print("🔄 训练 HMM 模型...")
-    hmm_model = HMModel(n_states=N_STATES)
-    hmm_model.fit(features.values)
-    states = hmm_model.predict(features.values)
-    state_series = pd.Series(states, index=features.index, name='state')
-
-    # 统计状态分布
-    print("\n📊 HMM 状态分布：")
-    state_counts = state_series.value_counts().sort_index()
-    for s, count in state_counts.items():
-        print(f"  State {s}: {count} 天 ({count/len(state_series)*100:.1f}%)")
-
-    # ---------- 3. 合并绘图 ----------
-    print(f"\n📈 生成组合图表（三行，含 MA100 斜率柱状图，并显示卖出信号）...")
-    fig = plot_combined(
-        df_price=strategy.df,          # 此时 strategy.df 已包含卖出信号列，但绘图函数使用 df_price 仅用于价格和均线
-        signals_df=signals_df,
-        state_series=state_series,
-        title=f"{TICKER} 海龟策略信号 + MA100斜率 + HMM 市场状态 (3种状态)",
-        exit_signals=exit_signals      # 传入卖出信号
-    )
-
-    # 确保输出目录存在，并保存为 {TICKER}_pipeline.html
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    output_path = os.path.join(OUTPUT_DIR, f"{TICKER}_pipeline.html")
-    fig.write_html(output_path)
-    print(f"✅ 组合图表已保存至 {output_path}")
-
-    # ---------- 4. 打印信号摘要 ----------
+    # ---------- 打印信号摘要 ----------
     setup_names = {
         '1_Consolidation': '场景1：下跌后或横盘中',
         '2_Pullback':      '场景2：上涨回撤中',
         '3_Surging':       '场景3：大幅上涨中'
     }
-    print("\n" + "="*60)
-    print("策略买入信号 (标准止损 2倍ATR，非财报期)")
-    print("="*60)
-    if signals_df.empty:
-        print("⚠️ 未发现任何符合条件的买入信号。")
-    else:
+    for item in results:
+        ticker = item["ticker"]
+        signals_df = item["signals_df"]
+        print("\n" + "=" * 60)
+        print(f"[{ticker}] 策略买入信号 (标准止损 2倍ATR，非财报期)")
+        print("=" * 60)
+        if signals_df.empty:
+            print("⚠️ 未发现任何符合条件的买入信号。")
+            continue
         print(f"✅ 共发现 {len(signals_df)} 个买入信号。")
         grouped = signals_df.groupby('setup')
         for setup_key, group in grouped:
@@ -321,5 +504,24 @@ if __name__ == "__main__":
             print(group.drop(columns=['setup']).head(5).to_string(index=False))
             print("-" * 80)
 
+    if failed:
+        print(f"\n⚠️ 以下 ticker 处理失败：{failed}")
+
     print("\n🎯 Pipeline 运行完成！")
-    print(f"👉 请用浏览器打开 {output_path} 查看综合图表。")
+    if mode == "standalone":
+        print("👉 已按独立模式输出每个 ticker 的 HTML。")
+    else:
+        print("👉 已输出整合模式 HTML（含 ticker 菜单切换）。")
+
+
+if __name__ == "__main__":
+    # ---------- 输入区（按需修改） ----------
+    TICKERS = ["AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "AMD", "NFLX", "V", "GOOGL", "META", "TSM", "META"]  # 可修改为任意股票代码列表
+    MODE = "integrated"   # 可选: "standalone" 或 "integrated"
+    N_STATES = 3
+
+    run_multi_ticker_pipeline(
+        tickers_input=TICKERS,
+        mode=MODE,
+        n_states=N_STATES
+    )
